@@ -1,0 +1,24 @@
+{
+  "$schema": "https://busbar.agency/schemas/busbar-module-v1.json",
+  "schemaVersion": "1",
+  "module": {
+    "id": "sf-action-sandbox",
+    "name": "Busbar Sandboxed SF Action",
+    "category": "security",
+    "icon": "sandbox",
+    "blurb": "Run a Salesforce CLI action inside a kernel-enforced capability sandbox.",
+    "longDescription": "Executes a single declarative Salesforce CLI action under a minimal, per-action capability manifest enforced by the OS kernel (Landlock on Linux runners). Confines filesystem and network access to only what the action needs, and emits a tamper-evident audit record of the granted capabilities and outcome.",
+    "version": "v1",
+    "compatibility": "fits",
+    "compatibilityNote": null,
+    "requires": ["sf-session"],
+    "provides": ["sf-action-audit"]
+  },
+  "publisher": {
+    "id": "busbar/core",
+    "name": "Busbar Core",
+    "kind": "official",
+    "verified": true,
+    "blurb": "First-party. github.com/busbar-actions."
+  }
+}
