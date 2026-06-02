@@ -1,5 +1,5 @@
-name: 'Busbar — sf-action-sandbox'
-description: 'Run a declarative Salesforce CLI action inside a nono capability sandbox (kernel-enforced Landlock on Linux runners) with a full audit trail.'
+name: 'Busbar — sf-cli'
+description: 'Run a declarative Salesforce CLI action inside a managed nono capability sandbox with a version-pinned sf install and a full audit trail.'
 author: 'Busbar'
 
 # A single declarative action (SfAction JSON) is executed under a minimal,
@@ -14,6 +14,10 @@ inputs:
     description: 'Sandbox enforcement mode: enforce | audit | disabled.'
     required: false
     default: 'enforce'
+  sf-cli-version:
+    description: 'npm version spec for @salesforce/cli to install (prefer an exact version such as 2.69.6).'
+    required: false
+    default: 'latest'
   working-dir:
     description: 'Working directory for the sf invocation.'
     required: false
@@ -27,7 +31,7 @@ inputs:
     required: false
     default: '.busbar/sandbox-audit.json'
   version:
-    description: 'Release tag of the sf-action-sandbox binary (e.g. v0.1.0). "latest" resolves the most recent release.'
+    description: 'Release tag of the sf-cli binary (e.g. v0.1.0). "latest" resolves the most recent release.'
     required: false
     default: 'latest'
   binary-repo:
@@ -54,53 +58,33 @@ outputs:
   result-path:
     description: 'Path to the structured sf result JSON (only when `output` was set).'
     value: ${{ steps.exec.outputs.result-path }}
+  sf-cli-path:
+    description: 'Path to the managed sf binary installed for this run.'
+    value: ${{ steps.install.outputs.sf-cli-path }}
+  sf-cli-prefix:
+    description: 'Prefix directory containing the managed sf install.'
+    value: ${{ steps.install.outputs.sf-cli-prefix }}
+  sf-cli-version:
+    description: 'Version of @salesforce/cli that was installed.'
+    value: ${{ steps.install.outputs.sf-cli-version }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Resolve release tag
-      id: tag
+    - name: Set up sf-cli
+      uses: busbar-actions/setup@main
+      with:
+        binary: sf-cli
+        version: ${{ inputs.version }}
+        binary-repo: ${{ inputs.binary-repo }}
+
+    - name: Install managed Salesforce CLI
+      id: install
       shell: bash
       run: |
         set -euo pipefail
-        if [[ "${{ inputs.version }}" == "latest" ]]; then
-          tag=$(gh release view --repo "${{ inputs.binary-repo }}" --json tagName -q .tagName)
-        else
-          tag="${{ inputs.version }}"
-        fi
-        echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      env:
-        GH_TOKEN: ${{ github.token }}
-
-    - name: Resolve binary asset name
-      id: asset
-      shell: bash
-      run: |
-        case "${{ runner.os }}-${{ runner.arch }}" in
-          Linux-X64)   name="sf-action-sandbox-x86_64-unknown-linux-gnu" ;;
-          Linux-ARM64) name="sf-action-sandbox-aarch64-unknown-linux-gnu" ;;
-          *) echo "sf-action-sandbox requires a Linux runner (kernel Landlock); got ${{ runner.os }}-${{ runner.arch }}" >&2; exit 1 ;;
-        esac
-        echo "name=$name" >> "$GITHUB_OUTPUT"
-
-    - name: Download sf-action-sandbox binary
-      shell: bash
-      run: |
-        set -euo pipefail
-        bin_dir="${RUNNER_TEMP}/sf-action-sandbox"
-        mkdir -p "$bin_dir"
-        gh release download "${{ steps.tag.outputs.tag }}" \
-          --repo "${{ inputs.binary-repo }}" \
-          --pattern "${{ steps.asset.outputs.name }}" \
-          --dir "$bin_dir"
-        bin_path="$bin_dir/${{ steps.asset.outputs.name }}"
-        chmod +x "$bin_path"
-        echo "$bin_dir" >> "$GITHUB_PATH"
-        if [[ "$bin_path" != "$bin_dir/sf-action-sandbox" ]]; then
-          ln -sf "$bin_path" "$bin_dir/sf-action-sandbox"
-        fi
-      env:
-        GH_TOKEN: ${{ github.token }}
+        install_dir="${RUNNER_TEMP}/managed-sf-cli"
+        sf-cli install --version "${{ inputs.sf-cli-version }}" --install-dir "$install_dir"
 
     - name: Run sandboxed action
       id: exec
@@ -116,8 +100,9 @@ runs:
 
         args=(exec --action "@${action_file}"
               --mode "${{ inputs.mode }}"
-              --audit-out "${{ inputs.audit-out }}")
+            --audit-out "${{ inputs.audit-out }}"
+            --sf-cli-path "${{ steps.install.outputs.sf-cli-path }}")
         [[ -n "${{ inputs.working-dir }}" ]] && args+=(--working-dir "${{ inputs.working-dir }}")
         [[ -n "${{ inputs.output }}" ]] && args+=(--output "${{ inputs.output }}")
 
-        sf-action-sandbox "${args[@]}"
+          sf-cli "${args[@]}"
