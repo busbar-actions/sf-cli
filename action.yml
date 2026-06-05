@@ -6,10 +6,50 @@ author: 'Busbar'
 # per-action capability manifest. On GitHub-hosted Linux runners the sandbox is
 # enforced with Landlock; the action records exactly which filesystem/network
 # capabilities were granted and the outcome, persisted as an audit artifact.
+#
+# AUTH (zero stored credentials): the sf-cli binary mints its OWN short-lived
+# Salesforce session IN-PROCESS from the runner's GitHub OIDC id-token (via
+# Busbar in the org on `target-instance`), registers it with the managed `sf` CLI,
+# runs the action, then revokes + zeroizes it. There is NO org-auth handoff step
+# and NO token written to GITHUB_ENV.
+#
+# The caller MUST grant the job `permissions: id-token: write` (so GitHub injects
+# the OIDC request endpoint) and set `target-instance` to the Busbar-equipped org
+# instance URL.
+#
+# SPECIAL CASE: unlike the pure-in-process busbar action binaries, sf-cli shells
+# out to the managed `@salesforce/cli`, which persists auth to `~/.sf`. The minted
+# token therefore unavoidably reaches that subprocess — but it is passed over the
+# child process ENV (never argv/logs, never GITHUB_ENV, never an action
+# input/output) and revoked at job end.
 inputs:
   action:
     description: 'The declarative action as an SfAction JSON document (e.g. {"action":"data_query","target_org":"my-org","soql":"SELECT Id FROM Account"}).'
     required: true
+  target-instance:
+    description: 'Instance URL of the Busbar-equipped Salesforce org to mint a session against via GitHub OIDC (no trailing slash). REQUIRED for the default OIDC auth path; the job must grant `permissions: id-token: write`.'
+    required: false
+    default: ''
+  eca-client-id:
+    description: 'Consumer key of the BusbarGitHubEca in the Busbar-equipped org (non-secret). Defaults to the baked PBO-pinned public key; override only for a custom ECA.'
+    required: false
+    default: ''
+  token-handler:
+    description: 'Apex token-exchange handler developer name in the Busbar-equipped org. Defaults to BBGitHubTokenExchangeHandler.'
+    required: false
+    default: ''
+  oidc-audience:
+    description: 'Audience to request the GitHub OIDC token for. Defaults to target-instance, binding the token to that org.'
+    required: false
+    default: ''
+  sf-access-token:
+    description: 'ADVANCED / local-dev OVERRIDE only. A pre-obtained Salesforce access token. If set (with sf-instance-url), the binary skips OIDC and uses it directly. Leave empty in CI — the default, recommended path is OIDC via target-instance.'
+    required: false
+    default: ''
+  sf-instance-url:
+    description: 'ADVANCED / local-dev OVERRIDE only. Instance URL paired with sf-access-token for the direct-token path.'
+    required: false
+    default: ''
   mode:
     description: 'Sandbox enforcement mode: enforce | audit | disabled.'
     required: false
@@ -71,38 +111,64 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Set up sf-cli
+    - name: Install the sf-cli binary from actions-dist
       uses: busbar-actions/setup@main
       with:
         binary: sf-cli
         version: ${{ inputs.version }}
         binary-repo: ${{ inputs.binary-repo }}
 
-    - name: Install managed Salesforce CLI
+    - name: Install the managed @salesforce/cli (version ${{ inputs.sf-cli-version }}) under RUNNER_TEMP
       id: install
       shell: bash
+      env:
+        INPUT_SF_CLI_VERSION: ${{ inputs.sf-cli-version }}
       run: |
         set -euo pipefail
         install_dir="${RUNNER_TEMP}/managed-sf-cli"
-        sf-cli install --version "${{ inputs.sf-cli-version }}" --install-dir "$install_dir"
+        echo "Installing @salesforce/cli@${INPUT_SF_CLI_VERSION} into ${install_dir}"
+        sf-cli install --version "$INPUT_SF_CLI_VERSION" --install-dir "$install_dir"
 
-    - name: Run sandboxed action
+    - name: Run the declarative SfAction in the Landlock-confined sandbox against the Busbar-equipped org
       id: exec
       shell: bash
-      # The action JSON is written to a temp file and passed via `--action @file`
-      # so arbitrary JSON (quotes, newlines) survives shell expansion intact.
+      # Inputs are passed via env (never interpolated into the script) so they
+      # cannot break out of the shell. The action JSON is written to a temp file
+      # and passed via `--action @file` so arbitrary JSON (quotes, newlines)
+      # survives shell expansion intact.
+      #
+      # AUTH: the binary self-mints a Salesforce session in-process. We set
+      # SF_INSTANCE_URL (from target-instance) plus the optional OIDC config, but
+      # DELIBERATELY do not set SF_ACCESS_TOKEN unless the advanced local-dev
+      # override (sf-access-token) is supplied. No token is written to GITHUB_ENV
+      # and there is no org-auth handoff step.
+      env:
+        INPUT_ACTION: ${{ inputs.action }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_AUDIT_OUT: ${{ inputs.audit-out }}
+        INPUT_WORKING_DIR: ${{ inputs.working-dir }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+        SF_CLI_PATH: ${{ steps.install.outputs.sf-cli-path }}
+        # OIDC self-mint config. SF_INSTANCE_URL is the Busbar-equipped org; when the
+        # advanced sf-instance-url override is set it takes precedence.
+        SF_INSTANCE_URL: ${{ inputs.sf-instance-url != '' && inputs.sf-instance-url || inputs.target-instance }}
+        ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
+        TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
+        OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+        # ADVANCED local-dev override only — empty in the default OIDC path, so
+        # session_from_env() treats it as absent and performs the OIDC exchange.
+        SF_ACCESS_TOKEN: ${{ inputs.sf-access-token }}
       run: |
         set -euo pipefail
         action_file="${RUNNER_TEMP}/sf-action.json"
-        cat > "$action_file" <<'BUSBAR_ACTION_EOF'
-        ${{ inputs.action }}
-        BUSBAR_ACTION_EOF
+        printf '%s\n' "$INPUT_ACTION" > "$action_file"
+        echo "Executing the SfAction from ${action_file} in sandbox mode '${INPUT_MODE}' against ${SF_INSTANCE_URL} (audit -> ${INPUT_AUDIT_OUT})"
 
         args=(exec --action "@${action_file}"
-              --mode "${{ inputs.mode }}"
-            --audit-out "${{ inputs.audit-out }}"
-            --sf-cli-path "${{ steps.install.outputs.sf-cli-path }}")
-        [[ -n "${{ inputs.working-dir }}" ]] && args+=(--working-dir "${{ inputs.working-dir }}")
-        [[ -n "${{ inputs.output }}" ]] && args+=(--output "${{ inputs.output }}")
+            --mode "$INPUT_MODE"
+            --audit-out "$INPUT_AUDIT_OUT"
+            --sf-cli-path "$SF_CLI_PATH")
+        [[ -n "$INPUT_WORKING_DIR" ]] && args+=(--working-dir "$INPUT_WORKING_DIR")
+        [[ -n "$INPUT_OUTPUT" ]] && args+=(--output "$INPUT_OUTPUT")
 
-          sf-cli "${args[@]}"
+        sf-cli "${args[@]}"

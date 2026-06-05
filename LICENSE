@@ -1,0 +1,55 @@
+# Busbar Pilot License Agreement
+
+**Version 1.0**
+
+> ### **TL;DR (The "Human-Readable" Version)**
+>
+> * **Evaluation Only:** This is a Pilot for testing and evaluation, not for mission-critical production use.
+> * **Keep it Safe:** Please don't reverse-engineer the "secret sauce" or build a clone based on what you see here.
+> * **Sharing:** We are confident in our tech! Feel free to share your experience, but please coordinate with us before posting deep-dive public benchmarks or "under-the-hood" technical reviews.
+> * **Feedback:** If you give us ideas or suggestions, we have the right to use them to make Busbar better.
+> * **No Stress:** The software is provided "As-Is." We aren't liable for any hiccups or data issues during this pilot phase.
+>
+> *Note: This summary is provided for convenience. The full legal terms below govern your use of the Software.*
+
+---
+
+### 1. Grant of License
+
+Subject to your acceptance of this Agreement, MuseLab, LLC ("Provider") grants you a limited, non-exclusive, non-transferable license to access and use the **busbar-actions** software and related interfaces (the **"Software"**) solely for internal evaluation and testing purposes within the scope of the **Pilot** program.
+
+### 2. Term and Termination
+
+This license is valid for the duration of the Pilot period. Either party may terminate this agreement at any time upon notice. Upon termination or the conclusion of the Pilot, your right to use the Software ceases, and you agree to cease use of and/or delete any locally installed pilot components.
+
+### 3. Usage Restrictions
+
+To protect the proprietary nature of the Software during this development phase, you agree **not** to:
+
+* Use the Software for mission-critical commercial operations where failure could result in significant loss.
+* Reverse engineer, decompile, disassemble, or attempt to extract the underlying composition logic of the Software beyond what is necessary to evaluate the publicly published source.
+* Sublicense, sell, rent, or redistribute the Software to any third party.
+* Use the Software specifically to build a competing product or for the purpose of "copycat" development.
+
+### 4. Sharing & Public Benchmarks
+
+We believe in the performance of Busbar and encourage you to discuss it with your peers. To ensure accuracy and context during this early phase, we ask that you:
+
+* Coordinate with the Provider before publishing public, high-visibility benchmarks or detailed "under-the-hood" technical reviews (e.g., blog posts or public video essays).
+* Refrain from sharing internal logic schemas or non-public documentation.
+
+### 5. Feedback License
+
+We welcome your input. If you provide suggestions, feature requests, or bug reports (**"Feedback"**), you grant the Provider a perpetual, irrevocable, royalty-free, worldwide license to use and incorporate that Feedback into the Software or other products without any obligation or compensation to you.
+
+### 6. No Warranty ("AS-IS")
+
+THE SOFTWARE IS EXPERIMENTAL AND PROVIDED **"AS IS."** TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE PROVIDER DISCLAIMS ALL WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+### 7. Limitation of Liability
+
+IN NO EVENT SHALL THE PROVIDER BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES (INCLUDING LOSS OF DATA, PROFITS, OR BUSINESS INTERRUPTION) ARISING OUT OF THE USE OR INABILITY TO USE THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+### 8. Governing Law
+
+This Agreement shall be governed by and construed in accordance with the laws of the State of Texas (Collin County), without regard to its conflict of law principles.
