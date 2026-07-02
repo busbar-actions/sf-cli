@@ -2,26 +2,28 @@ name: 'Busbar — sf-cli'
 description: 'Run a declarative Salesforce CLI action inside a managed nono capability sandbox with a version-pinned sf install and a full audit trail.'
 author: 'Busbar'
 
-# A single declarative action (SfAction JSON) is executed under a minimal,
-# per-action capability manifest. On GitHub-hosted Linux runners the sandbox is
-# enforced with Landlock; the action records exactly which filesystem/network
-# capabilities were granted and the outcome, persisted as an audit artifact.
+# A single declarative action (SfAction JSON) is executed inside a busbar-sandbox
+# session: a nono capability sandbox whose network egress is kernel-forced through
+# an in-process injecting proxy (`ProxyOnly`). The action records exactly which
+# endpoints the `sf` invocation hit and the outcome, persisted as an audit artifact.
 #
 # AUTH (zero stored credentials): the sf-cli binary mints its OWN short-lived
-# Salesforce session IN-PROCESS from the runner's GitHub OIDC id-token (via
-# Busbar in the org on `target-instance`), registers it with the managed `sf` CLI,
-# runs the action, then revokes + zeroizes it. There is NO org-auth handoff step
-# and NO token written to GITHUB_ENV.
+# Salesforce session IN-PROCESS from the runner's GitHub OIDC id-token (exchanged
+# at the Busbar-equipped org on `target-instance`) and HOLDS that token in the
+# supervisor's own memory. It logs the managed `sf` CLI into the org through the
+# proxy with a PLACEHOLDER token; the proxy swaps in the real `Authorization`
+# header server-side, so the `~/.sf` entry that lands on disk carries only the
+# placeholder — the managed `sf` NEVER holds the real bearer token. At job end the
+# session is revoked + zeroized. There is NO org-auth handoff step and NO token
+# written to GITHUB_ENV.
+#
+# CONFINEMENT is unconditional: egress is kernel-enforced ProxyOnly (Landlock v4 /
+# kernel 6.7+ on Linux runners), so if the host lacks kernel support, session
+# setup fails closed rather than running unconfined.
 #
 # The caller MUST grant the job `permissions: id-token: write` (so GitHub injects
 # the OIDC request endpoint) and set `target-instance` to the Busbar-equipped org
 # instance URL.
-#
-# SPECIAL CASE: unlike the pure-in-process busbar action binaries, sf-cli shells
-# out to the managed `@salesforce/cli`, which persists auth to `~/.sf`. The minted
-# token therefore unavoidably reaches that subprocess — but it is passed over the
-# child process ENV (never argv/logs, never GITHUB_ENV, never an action
-# input/output) and revoked at job end.
 inputs:
   action:
     description: 'The declarative action as an SfAction JSON document (e.g. {"action":"data_query","target_org":"my-org","soql":"SELECT Id FROM Account"}).'
@@ -31,53 +33,41 @@ inputs:
     required: false
     default: ''
   eca-client-id:
-    description: 'Consumer key of the BusbarGitHubEca in the Busbar-equipped org (non-secret). Defaults to the baked PBO-pinned public key; override only for a custom ECA.'
+    description: 'Consumer key of the External Client App in the Busbar-equipped org (non-secret). Defaults to the baked public key when empty.'
     required: false
     default: ''
   token-handler:
-    description: 'Apex token-exchange handler developer name in the Busbar-equipped org. Defaults to BBGitHubTokenExchangeHandler.'
+    description: 'Apex token-exchange handler dev name. Defaults to `GitHubTokenExchangeHandler` when empty.'
     required: false
     default: ''
   oidc-audience:
-    description: 'Audience to request the GitHub OIDC token for. Defaults to target-instance, binding the token to that org.'
+    description: 'OIDC token audience. Defaults to `target-instance` when empty.'
     required: false
     default: ''
   sf-access-token:
-    description: 'ADVANCED / local-dev OVERRIDE only. A pre-obtained Salesforce access token. If set (with sf-instance-url), the binary skips OIDC and uses it directly. Leave empty in CI — the default, recommended path is OIDC via target-instance.'
+    description: 'Advanced / local-dev override ONLY. Pre-obtained access token; skips OIDC. Leave empty in CI.'
     required: false
     default: ''
   sf-instance-url:
-    description: 'ADVANCED / local-dev OVERRIDE only. Instance URL paired with sf-access-token for the direct-token path.'
+    description: 'Advanced / local-dev override ONLY. Instance URL paired with `sf-access-token`. Takes precedence over `target-instance` when set.'
     required: false
     default: ''
-  mode:
-    description: 'Sandbox enforcement mode: enforce | audit | disabled.'
-    required: false
-    default: 'enforce'
   sf-cli-version:
-    description: 'npm version spec for @salesforce/cli to install (prefer an exact version such as 2.69.6).'
+    description: 'npm version spec for `@salesforce/cli` to install (e.g. `2.69.6`, or `latest`). Pin an exact version for reproducibility.'
     required: false
     default: 'latest'
   working-dir:
-    description: 'Working directory for the sf invocation.'
+    description: 'Working directory for the `sf` invocation.'
     required: false
     default: ''
   output:
-    description: 'Path to write the structured sf result JSON.'
+    description: 'Path to write the structured `sf` result JSON (in addition to stdout).'
     required: false
     default: ''
   audit-out:
-    description: 'Path to write the JSON audit log.'
+    description: 'Path to write the JSON audit log for this run.'
     required: false
     default: '.busbar/sandbox-audit.json'
-  version:
-    description: 'Release tag of the sf-cli binary (e.g. v0.1.0). "latest" resolves the most recent release.'
-    required: false
-    default: 'latest'
-  binary-repo:
-    description: 'GitHub repo hosting the prebuilt binary releases.'
-    required: false
-    default: 'busbar-actions/actions-dist'
 
 outputs:
   success:
@@ -115,8 +105,8 @@ runs:
       uses: busbar-actions/setup@main
       with:
         binary: sf-cli
-        version: ${{ inputs.version }}
-        binary-repo: ${{ inputs.binary-repo }}
+        version: ${{ env.BUSBAR_ACTION_VERSION || 'latest' }}
+        binary-repo: ${{ env.BUSBAR_ACTION_REPO || 'busbar-actions/actions-dist' }}
 
     - name: Install the managed @salesforce/cli (version ${{ inputs.sf-cli-version }}) under RUNNER_TEMP
       id: install
@@ -129,7 +119,7 @@ runs:
         echo "Installing @salesforce/cli@${INPUT_SF_CLI_VERSION} into ${install_dir}"
         sf-cli install --version "$INPUT_SF_CLI_VERSION" --install-dir "$install_dir"
 
-    - name: Run the declarative SfAction in the Landlock-confined sandbox against the Busbar-equipped org
+    - name: Run the declarative SfAction in the busbar-sandbox (ProxyOnly) against the Busbar-equipped org
       id: exec
       shell: bash
       # Inputs are passed via env (never interpolated into the script) so they
@@ -137,35 +127,32 @@ runs:
       # and passed via `--action @file` so arbitrary JSON (quotes, newlines)
       # survives shell expansion intact.
       #
-      # AUTH: the binary self-mints a Salesforce session in-process. We set
-      # SF_INSTANCE_URL (from target-instance) plus the optional OIDC config, but
-      # DELIBERATELY do not set SF_ACCESS_TOKEN unless the advanced local-dev
-      # override (sf-access-token) is supplied. No token is written to GITHUB_ENV
-      # and there is no org-auth handoff step.
+      # AUTH: the binary self-mints a Salesforce session in-process from the OIDC
+      # config below and holds the token in the supervisor. `sf` logs in through
+      # the injecting proxy with a placeholder — it never holds the real token.
+      # Empty auth-config vars fall back to busbar-auth's baked defaults;
+      # SF_ACCESS_TOKEN is set only for the advanced local-dev override and is
+      # empty in CI (→ the OIDC path). No token is written to GITHUB_ENV.
       env:
         INPUT_ACTION: ${{ inputs.action }}
-        INPUT_MODE: ${{ inputs.mode }}
         INPUT_AUDIT_OUT: ${{ inputs.audit-out }}
         INPUT_WORKING_DIR: ${{ inputs.working-dir }}
         INPUT_OUTPUT: ${{ inputs.output }}
         SF_CLI_PATH: ${{ steps.install.outputs.sf-cli-path }}
-        # OIDC self-mint config. SF_INSTANCE_URL is the Busbar-equipped org; when the
-        # advanced sf-instance-url override is set it takes precedence.
-        SF_INSTANCE_URL: ${{ inputs.sf-instance-url != '' && inputs.sf-instance-url || inputs.target-instance }}
+        # OIDC self-mint config. The advanced `sf-instance-url` override takes
+        # precedence over `target-instance`; empty values defer to busbar-auth.
+        SF_INSTANCE_URL: ${{ inputs.sf-instance-url || inputs.target-instance || env.SF_INSTANCE_URL }}
+        SF_ACCESS_TOKEN: ${{ inputs.sf-access-token }}
         ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
         OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
-        # ADVANCED local-dev override only — empty in the default OIDC path, so
-        # session_from_env() treats it as absent and performs the OIDC exchange.
-        SF_ACCESS_TOKEN: ${{ inputs.sf-access-token }}
       run: |
         set -euo pipefail
         action_file="${RUNNER_TEMP}/sf-action.json"
         printf '%s\n' "$INPUT_ACTION" > "$action_file"
-        echo "Executing the SfAction from ${action_file} in sandbox mode '${INPUT_MODE}' against ${SF_INSTANCE_URL} (audit -> ${INPUT_AUDIT_OUT})"
+        echo "Executing the SfAction from ${action_file} in the busbar-sandbox (ProxyOnly) against ${SF_INSTANCE_URL} (audit -> ${INPUT_AUDIT_OUT})"
 
         args=(exec --action "@${action_file}"
-            --mode "$INPUT_MODE"
             --audit-out "$INPUT_AUDIT_OUT"
             --sf-cli-path "$SF_CLI_PATH")
         [[ -n "$INPUT_WORKING_DIR" ]] && args+=(--working-dir "$INPUT_WORKING_DIR")

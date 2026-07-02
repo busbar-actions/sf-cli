@@ -17,28 +17,34 @@ not need to preinstall `sf` on `PATH`.
 
 The `sf-cli` binary **mints its own short-lived Salesforce session in-process**
 from the runner's GitHub **OIDC** id-token (exchanged at a Salesforce org with
-Busbar installed and trust established), registers it with the managed `sf` CLI,
-runs your action, then **revokes and zeroizes** it at job end. There is **no
-`org-auth` handoff step**, and **no token is written to `GITHUB_ENV`** or passed
-as an action input/output.
+Busbar installed and trust established) and **holds that token in the supervisor's
+own memory**. It logs the managed `sf` CLI into the org **through an in-process
+injecting proxy** using a **placeholder** token; the proxy swaps in the real
+`Authorization` header **server-side**, so the managed `sf` **never holds the real
+bearer token** — the `~/.sf` entry that lands on disk carries only the placeholder.
+The session is **revoked and zeroized** at job end. There is **no `org-auth`
+handoff step**, and **no token is written to `GITHUB_ENV`** or passed as an action
+input/output.
 
 To use it, the calling job must:
 
 1. Grant `permissions: id-token: write` (so GitHub injects the OIDC endpoint).
 2. Set `target-instance` to the Busbar-equipped org's instance URL.
 
-> ### Managed-CLI caveat (the one exception)
+> ### How the managed CLI stays token-free
 >
 > Every other Busbar action binary keeps the minted token **only in zeroizing
 > memory** and calls the Salesforce API directly. `sf-cli` is different: it shells
-> out to the managed `@salesforce/cli`, which persists auth to `~/.sf`. The minted
-> token therefore **unavoidably reaches that subprocess**. We minimize the blast
-> radius: the token is handed to `sf org login access-token` over the child
-> process **environment** (never the arg list, never logs), is **never** written
-> to `GITHUB_ENV` or exposed as an input/output, and is **revoked server-side**
-> (and the local alias logged out) when the action finishes. This is an inherent
-> property of driving the managed CLI — not a deviation from the
-> mint→use→revoke model for our own code.
+> out to the managed `@salesforce/cli`, which persists auth to `~/.sf`. Rather than
+> hand `sf` the real token, the run is confined to a **busbar-sandbox** session
+> whose network egress is kernel-forced (`ProxyOnly`) through the supervisor's
+> in-process proxy. `sf` authenticates with a **placeholder**; the proxy strips it
+> and injects the real session **server-side** for requests bound to the org
+> (`Authorization: Bearer` for REST, `X-SFDC-Session` for the Bulk API). So the
+> real bearer token **never reaches the subprocess**, is **never** written to
+> `GITHUB_ENV` or exposed as an input/output, and is **revoked server-side** when
+> the action finishes — preserving the mint→use→revoke model even for the managed
+> CLI.
 
 ## What it does
 
@@ -55,8 +61,9 @@ To use it, the calling job must:
    (Blake3 manifest hash, granted capabilities, outcome) as a workflow artifact.
 
 The sandbox is built on the [`nono`](https://docs.rs/nono) capability runtime.
-GitHub-hosted runners are Linux 5.13+, so `mode: enforce` applies real Landlock
-restrictions there.
+Confinement is **unconditional**: egress is kernel-forced `ProxyOnly` via Landlock
+NetPort, which needs **Landlock v4 (Linux kernel 6.7+)**. On a host without that
+support, session setup **fails closed** rather than running unconfined.
 
 > **Prerequisite:** the job must have Node/npm available so the action can
 > install `@salesforce/cli` into a controlled prefix. GitHub-hosted runners do.
@@ -71,11 +78,10 @@ restrictions there.
 | `action` (required) | — | The declarative action as `SfAction` JSON. |
 | `target-instance` | `` | Busbar-equipped org instance URL to mint a session against via GitHub OIDC. **Required for the default auth path** (with `permissions: id-token: write`). |
 | `eca-client-id` | `` | Consumer key of the `BusbarGitHubEca` in the Busbar-equipped org (non-secret). Defaults to the baked PBO-pinned public key. |
-| `token-handler` | `` | Apex token-exchange handler dev name. Defaults to `BBGitHubTokenExchangeHandler`. |
+| `token-handler` | `` | Apex token-exchange handler dev name. Defaults to `GitHubTokenExchangeHandler`. |
 | `oidc-audience` | `` | OIDC token audience. Defaults to `target-instance`. |
 | `sf-access-token` | `` | **Advanced / local-dev override only.** Pre-obtained token; skips OIDC. Leave empty in CI. |
-| `sf-instance-url` | `` | **Advanced / local-dev override only.** Instance URL paired with `sf-access-token`. |
-| `mode` | `enforce` | `enforce` (kernel-confined), `audit` (run + log policy), or `disabled`. |
+| `sf-instance-url` | `` | **Advanced / local-dev override only.** Instance URL paired with `sf-access-token`. Takes precedence over `target-instance` when set. |
 | `sf-cli-version` | `latest` | npm version spec for `@salesforce/cli` to install. Pin an exact version if you want reproducibility. |
 | `working-dir` | `` | Working directory for the `sf` invocation. |
 | `output` | `` | Path to write the structured `sf` result JSON. |
@@ -138,7 +144,6 @@ jobs:
         id: q
         with:
           target-instance: ${{ vars.SF_INSTANCE_URL }}   # Busbar-equipped org instance URL
-          mode: enforce
           sf-cli-version: 2.69.6
           action: |
             {
@@ -158,10 +163,10 @@ jobs:
 No `org-auth`/login step is needed — the binary mints, uses, and revokes the
 session itself. There is no token in `GITHUB_ENV` and none passed between steps.
 
-## Local / non-Linux behavior
+## Platform requirements
 
-`mode: enforce` requires a Unix kernel sandbox (Linux Landlock or macOS
-Seatbelt). On unsupported platforms `enforce` fails fast rather than running
-unconfined — use `mode: audit` to execute while only logging the policy that
-*would* be enforced. The published composite action currently ships a Linux
-x86_64 binary only.
+Confinement is kernel-enforced and unconditional — there is no unconfined mode.
+The `ProxyOnly` egress boundary requires **Landlock v4 (Linux kernel 6.7+)**; on a
+host without it, session setup **fails closed** rather than running unconfined. The
+published composite action currently ships a Linux x86_64 binary only, and
+GitHub-hosted `ubuntu-latest` runners meet the kernel requirement.
