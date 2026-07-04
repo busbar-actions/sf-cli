@@ -68,6 +68,12 @@ inputs:
     description: 'Path to write the JSON audit log for this run.'
     required: false
     default: '.busbar/sandbox-audit.json'
+  artifact-name:
+    description: >-
+      Name for the uploaded sandbox audit + generalized-fingerprint artifact. Must
+      be UNIQUE within a workflow run (set a distinct value per sf-cli step).
+    required: false
+    default: 'busbar-sandbox-sf'
 
 outputs:
   success:
@@ -146,6 +152,11 @@ runs:
         ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
         OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+        # Always write the {org}-masked endpoint declaration + generalized
+        # capability fingerprint (uploaded as artifacts below). Distinct from the
+        # SfAction `--audit-out` log above.
+        BUSBAR_SANDBOX_AUDIT_OUT: ${{ format('{0}/busbar-sandbox-audit.json', runner.temp) }}
+        BUSBAR_SANDBOX_FINGERPRINT_OUT: ${{ format('{0}/busbar-sandbox-fingerprint.json', runner.temp) }}
       run: |
         set -euo pipefail
         action_file="${RUNNER_TEMP}/sf-action.json"
@@ -159,3 +170,14 @@ runs:
         [[ -n "$INPUT_OUTPUT" ]] && args+=(--output "$INPUT_OUTPUT")
 
         sf-cli "${args[@]}"
+
+    - name: Upload sandbox audit + generalized fingerprint
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ format('{0}/busbar-sandbox-audit.json', runner.temp) }}
+          ${{ format('{0}/busbar-sandbox-fingerprint.json', runner.temp) }}
+        if-no-files-found: warn
+        retention-days: 30
