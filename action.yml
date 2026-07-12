@@ -44,14 +44,6 @@ inputs:
     description: 'OIDC token audience. Defaults to `target-instance` when empty.'
     required: false
     default: ''
-  sf-access-token:
-    description: 'Advanced / local-dev override ONLY. Pre-obtained access token; skips OIDC. Leave empty in CI.'
-    required: false
-    default: ''
-  sf-instance-url:
-    description: 'Advanced / local-dev override ONLY. Instance URL paired with `sf-access-token`. Takes precedence over `target-instance` when set.'
-    required: false
-    default: ''
   sf-cli-version:
     description: 'npm version spec for `@salesforce/cli` to install (e.g. `2.69.6`, or `latest`). Pin an exact version for reproducibility.'
     required: false
@@ -136,19 +128,16 @@ runs:
       # AUTH: the binary self-mints a Salesforce session in-process from the OIDC
       # config below and holds the token in the supervisor. `sf` logs in through
       # the injecting proxy with a placeholder — it never holds the real token.
-      # Empty auth-config vars fall back to busbar-auth's baked defaults;
-      # SF_ACCESS_TOKEN is set only for the advanced local-dev override and is
-      # empty in CI (→ the OIDC path). No token is written to GITHUB_ENV.
+      # Empty auth-config vars fall back to busbar-auth's baked defaults. There is
+      # NO token-input escape hatch — OIDC via `target-instance` is the only auth
+      # path, no exceptions. No token is written to GITHUB_ENV.
       env:
         INPUT_ACTION: ${{ inputs.action }}
         INPUT_AUDIT_OUT: ${{ inputs.audit-out }}
         INPUT_WORKING_DIR: ${{ inputs.working-dir }}
         INPUT_OUTPUT: ${{ inputs.output }}
         SF_CLI_PATH: ${{ steps.install.outputs.sf-cli-path }}
-        # OIDC self-mint config. The advanced `sf-instance-url` override takes
-        # precedence over `target-instance`; empty values defer to busbar-auth.
-        SF_INSTANCE_URL: ${{ inputs.sf-instance-url || inputs.target-instance || env.SF_INSTANCE_URL }}
-        SF_ACCESS_TOKEN: ${{ inputs.sf-access-token }}
+        SF_INSTANCE_URL: ${{ inputs.target-instance || env.SF_INSTANCE_URL }}
         ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
         OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
