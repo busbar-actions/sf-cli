@@ -66,6 +66,14 @@ inputs:
       be UNIQUE within a workflow run (set a distinct value per sf-cli step).
     required: false
     default: 'busbar-sandbox-sf'
+  version:
+    description: 'Release tag of the sf-cli binary. Falls back to env.BUSBAR_ACTION_VERSION, then "latest".'
+    required: false
+    default: ''
+  binary-repo:
+    description: 'GitHub repo hosting prebuilt binary releases. Falls back to env.BUSBAR_ACTION_REPO, then busbar-actions/actions-dist.'
+    required: false
+    default: ''
 
 outputs:
   success:
@@ -103,8 +111,8 @@ runs:
       uses: busbar-actions/setup@main
       with:
         binary: sf-cli
-        version: ${{ env.BUSBAR_ACTION_VERSION || 'latest' }}
-        binary-repo: ${{ env.BUSBAR_ACTION_REPO || 'busbar-actions/actions-dist' }}
+        version: ${{ inputs.version || env.BUSBAR_ACTION_VERSION || 'latest' }}
+        binary-repo: ${{ inputs.binary-repo || env.BUSBAR_ACTION_REPO || 'busbar-actions/actions-dist' }}
 
     - name: Install the managed @salesforce/cli (version ${{ inputs.sf-cli-version }}) under RUNNER_TEMP
       id: install
