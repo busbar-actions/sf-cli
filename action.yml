@@ -59,7 +59,7 @@ inputs:
   audit-out:
     description: 'Path to write the JSON audit log for this run.'
     required: false
-    default: '.busbar/sandbox-audit.json'
+    default: '.busbar/logs/sandbox-audit.json'
   artifact-name:
     description: >-
       Name for the uploaded sandbox audit + generalized-fingerprint artifact. Must
