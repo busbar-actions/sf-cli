@@ -1,5 +1,5 @@
 name: 'Busbar — sf-cli'
-description: 'Run a declarative Salesforce CLI action inside a managed nono capability sandbox with a version-pinned sf install and a full audit trail.'
+description: 'Run a declarative Salesforce CLI action inside a managed nono capability sandbox, every request decided by the Salesforce request policy and this repository''s Cedar policies, with a full audit trail.'
 author: 'Busbar'
 
 # A single declarative action (SfAction JSON) is executed inside a busbar-sandbox
@@ -21,9 +21,23 @@ author: 'Busbar'
 # kernel 6.7+ on Linux runners), so if the host lacks kernel support, session
 # setup fails closed rather than running unconfined.
 #
+# ENFORCEMENT: every request `sf` sends is shown to the Salesforce request
+# policy in full (request line, headers, body) before the credential is
+# injected, and decided by what it does, whatever `sf` release sent it (no
+# `sf-cli-version` pin is needed). Payload SOQL is parsed only in a confined,
+# credential-free helper process. Every run also applies this repository's
+# `.busbar/policies/*.cedar`, read from the head of the default branch with
+# `github-token` (the supervisor only; never given to `sf`): any policy may
+# forbid any operation, e.g. a query whose risk score is too high for a
+# production org. An invalid policy set fails the run before `sf` starts.
+# The proxy removes every header it does not forward before the policy sees
+# the request (the request goes on without it); `.busbar/door.toml` on the
+# default branch can name more headers to forward.
+#
 # The caller MUST grant the job `permissions: id-token: write` (so GitHub injects
-# the OIDC request endpoint) and set `target-instance` to the Busbar-equipped org
-# instance URL.
+# the OIDC request endpoint) and `contents: read` (so the supervisor can read
+# the repository's policies), and set `target-instance` to the Busbar-equipped
+# org instance URL.
 inputs:
   action:
     description: 'The declarative action as an SfAction JSON document (e.g. {"action":"data_query","target_org":"my-org","soql":"SELECT Id FROM Account"}).'
@@ -45,9 +59,18 @@ inputs:
     required: false
     default: ''
   sf-cli-version:
-    description: 'npm version spec for `@salesforce/cli` to install (e.g. `2.69.6`, or `latest`). Pin an exact version for reproducibility.'
+    description: 'npm version spec for `@salesforce/cli` to install (e.g. `2.151.7`, or `latest`). Any release works: the request policy decides by what each request does, not by the CLI version. Pin one only for reproducibility.'
     required: false
     default: 'latest'
+  github-token:
+    description: >-
+      GitHub token the sf-cli supervisor uses to read this repository's
+      default branch, its `.busbar/policies` and `.busbar/door.toml` through
+      the GitHub REST API.
+      Needs `contents: read`: with the default (the job's own token) grant
+      `permissions: contents: read`. Never given to `sf`.
+    required: false
+    default: ${{ github.token }}
   working-dir:
     description: 'Working directory for the `sf` invocation.'
     required: false
@@ -149,6 +172,11 @@ runs:
         ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
         OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+        # Read by the sf-cli supervisor only (from its environment, never an
+        # argument), for the repository's policies. The sandboxed `sf` starts
+        # from an explicit environment that never carries a GITHUB_* variable,
+        # and the decode helper gets no environment at all.
+        GITHUB_TOKEN: ${{ inputs.github-token }}
         # Always write the {org}-masked endpoint declaration + generalized
         # capability fingerprint (uploaded as artifacts below). Distinct from the
         # SfAction `--audit-out` log above.
