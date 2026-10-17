@@ -1,25 +1,36 @@
 name: 'Busbar — sf-cli'
-description: 'Run a declarative Salesforce CLI action inside a managed nono capability sandbox, every request decided by the Salesforce request policy and this repository''s Cedar policies, with a full audit trail.'
+description: 'Run a declarative Salesforce CLI action inside a managed nono capability sandbox, every request decided by the Salesforce request policy and this repository''s Cedar policies, with a full audit trail and a run record.'
 author: 'Busbar'
 
 # A single declarative action (SfAction JSON) is executed inside a busbar-sandbox
 # session: a nono capability sandbox whose network egress is kernel-forced through
-# an in-process injecting proxy (`ProxyOnly`). The action records exactly which
-# endpoints the `sf` invocation hit and the outcome, persisted as an audit artifact.
+# an in-process injecting proxy (`ProxyOnly`). The run records exactly which
+# endpoints the `sf` invocation hit and the outcome, persisted as artifacts.
 #
-# AUTH (zero stored credentials): the sf-cli binary mints its OWN short-lived
-# Salesforce session IN-PROCESS from the runner's GitHub OIDC id-token (exchanged
-# at the Busbar-equipped org on `target-instance`) and HOLDS that token in the
-# supervisor's own memory. It logs the managed `sf` CLI into the org through the
-# proxy with a PLACEHOLDER token; the proxy swaps in the real `Authorization`
-# header server-side, so the `~/.sf` entry that lands on disk carries only the
-# placeholder — the managed `sf` NEVER holds the real bearer token. At job end the
-# session is revoked + zeroized. There is NO org-auth handoff step and NO token
-# written to GITHUB_ENV.
+# THE HARNESS: `sf-cli exec` is an Action on the Busbar Action framework's
+# harness and takes no flags. Its inputs are exactly the `INPUT_*` variables
+# the exec step maps below (an `INPUT_*` naming no input refuses the run),
+# over this repository's `.busbar/actions/sf-cli.{json,yaml}` on its default
+# branch. The harness declares the run (the typed inputs, the grant, the job's
+# signed identity), loads this repository's `.busbar/policies/*.cedar` and asks
+# them whether a session may be minted (`Busbar::Action::"session.mint"`),
+# mints, runs the action, delivers the outputs, writes the run record
+# (`run-report-path`) and disposes of the credential on every path.
+#
+# AUTH (zero stored credentials): the harness mints a short-lived Salesforce
+# session from the runner's GitHub OIDC id-token (exchanged at the
+# Busbar-equipped org on `target-instance`) and HOLDS that token in the
+# supervisor's own memory. The managed `sf` CLI names the org by a PLACEHOLDER
+# token; the proxy swaps in the real `Authorization` header server-side, so
+# the `~/.sf` entry that lands on disk carries only the placeholder and the
+# managed `sf` NEVER holds the real bearer token. At the end of the run the
+# session is revoked + zeroized. There is NO org-auth handoff step, NO token
+# input and NO token written to GITHUB_ENV; a run whose environment carries a
+# Salesforce token (SF_ACCESS_TOKEN) is refused before anything is minted.
 #
 # CONFINEMENT is unconditional: egress is kernel-enforced ProxyOnly (Landlock v4 /
-# kernel 6.7+ on Linux runners), so if the host lacks kernel support, session
-# setup fails closed rather than running unconfined.
+# kernel 6.7+ on Linux runners), so if the host lacks kernel support, the
+# sandbox fails closed rather than running unconfined.
 #
 # ENFORCEMENT: every request `sf` sends is shown to the Salesforce request
 # policy in full (request line, headers, body) before the credential is
@@ -27,12 +38,12 @@ author: 'Busbar'
 # `sf-cli-version` pin is needed). Payload SOQL is parsed only in a confined,
 # credential-free helper process. Every run also applies this repository's
 # `.busbar/policies/*.cedar`, read from the head of the default branch with
-# `github-token` (the supervisor only; never given to `sf`): any policy may
-# forbid any operation, e.g. a query whose risk score is too high for a
-# production org. An invalid policy set fails the run before `sf` starts.
-# The proxy removes every header it does not forward before the policy sees
-# the request (the request goes on without it); `.busbar/door.toml` on the
-# default branch can name more headers to forward.
+# `github-token` (the supervisor only; never given to `sf`): a policy may
+# forbid the mint itself, or any operation, e.g. a query whose risk score is
+# too high for a production org. An invalid policy set fails the run before
+# anything is minted. The proxy removes every header it does not forward
+# before the policy sees the request (the request goes on without it);
+# `.busbar/door.toml` on the default branch can name more headers to forward.
 #
 # The caller MUST grant the job `permissions: id-token: write` (so GitHub injects
 # the OIDC request endpoint) and `contents: read` (so the supervisor can read
@@ -40,10 +51,10 @@ author: 'Busbar'
 # org instance URL.
 inputs:
   action:
-    description: 'The declarative action as an SfAction JSON document (e.g. {"action":"data_query","target_org":"my-org","soql":"SELECT Id FROM Account"}).'
+    description: 'The declarative action as an SfAction document, JSON or YAML (e.g. {"action":"data_query","target_org":"my-org","soql":"SELECT Id FROM Account"}).'
     required: true
   target-instance:
-    description: 'Instance URL of the Busbar-equipped Salesforce org to mint a session against via GitHub OIDC (no trailing slash). REQUIRED for the default OIDC auth path; the job must grant `permissions: id-token: write`.'
+    description: 'Instance URL of the Busbar-equipped Salesforce org to mint a session against via GitHub OIDC (https, no path, no trailing slash). REQUIRED; the job must grant `permissions: id-token: write`.'
     required: false
     default: ''
   eca-client-id:
@@ -65,8 +76,8 @@ inputs:
   github-token:
     description: >-
       GitHub token the sf-cli supervisor uses to read this repository's
-      default branch, its `.busbar/policies` and `.busbar/door.toml` through
-      the GitHub REST API.
+      default branch, its `.busbar/actions/sf-cli.{json,yaml}`,
+      `.busbar/policies` and `.busbar/door.toml` through the GitHub REST API.
       Needs `contents: read`: with the default (the job's own token) grant
       `permissions: contents: read`. Never given to `sf`.
     required: false
@@ -85,8 +96,8 @@ inputs:
     default: '.busbar/logs/sandbox-audit.json'
   artifact-name:
     description: >-
-      Name for the uploaded sandbox audit + generalized-fingerprint artifact. Must
-      be UNIQUE within a workflow run (set a distinct value per sf-cli step).
+      Name for the uploaded audit log + run record artifact. Must be UNIQUE
+      within a workflow run (set a distinct value per sf-cli step).
     required: false
     default: 'busbar-sandbox-sf'
   version:
@@ -100,7 +111,7 @@ inputs:
 
 outputs:
   success:
-    description: '"true" when the action executed successfully.'
+    description: '"true" when the action executed successfully, "false" when `sf` failed.'
     value: ${{ steps.exec.outputs.success }}
   duration-ms:
     description: 'Wall-clock duration of the sf invocation in milliseconds.'
@@ -117,6 +128,18 @@ outputs:
   result-path:
     description: 'Path to the structured sf result JSON (only when `output` was set).'
     value: ${{ steps.exec.outputs.result-path }}
+  run-report-path:
+    description: 'Path to the run record the harness wrote (the declaration with its recorded facts, the outcome, the policy report, the sandbox record and the run journal; under RUNNER_TEMP).'
+    value: ${{ steps.exec.outputs.run-report-path }}
+  org-kind:
+    description: 'How the target org was classified (scratch | sandbox | production; anything doubtful is production).'
+    value: ${{ steps.exec.outputs.org-kind }}
+  claim-status:
+    description: 'Whether the run is claim-eligible (eligible | ineligible).'
+    value: ${{ steps.exec.outputs.claim-status }}
+  policy-denied:
+    description: 'How many requests the Salesforce request policy denied (each reached `sf` as HTTP 403).'
+    value: ${{ steps.exec.outputs.policy-denied }}
   sf-cli-path:
     description: 'Path to the managed sf binary installed for this run.'
     value: ${{ steps.install.outputs.sf-cli-path }}
@@ -151,58 +174,47 @@ runs:
     - name: Run the declarative SfAction in the busbar-sandbox (ProxyOnly) against the Busbar-equipped org
       id: exec
       shell: bash
-      # Inputs are passed via env (never interpolated into the script) so they
-      # cannot break out of the shell. The action JSON is written to a temp file
-      # and passed via `--action @file` so arbitrary JSON (quotes, newlines)
-      # survives shell expansion intact.
+      # `sf-cli exec` takes no flags. Its inputs are exactly the INPUT_* variables
+      # below, one per input the Action declares (`action`, `sf_cli_path`,
+      # `working_dir`, `output`, `audit_out`); the harness refuses any other
+      # INPUT_*. An empty value is an unset input. The action document is passed
+      # inline (JSON or YAML; the harness loads it as a document), never
+      # interpolated into the script.
       #
-      # AUTH: the binary self-mints a Salesforce session in-process from the OIDC
-      # config below and holds the token in the supervisor. `sf` logs in through
-      # the injecting proxy with a placeholder — it never holds the real token.
-      # Empty auth-config vars fall back to busbar-auth's baked defaults. There is
-      # NO token-input escape hatch — OIDC via `target-instance` is the only auth
-      # path, no exceptions. No token is written to GITHUB_ENV.
+      # AUTH: the harness mints the Salesforce session in-process from the OIDC
+      # config below and holds the token in the supervisor. `sf` names the org
+      # by a placeholder; it never holds the real token. Empty auth-config vars
+      # fall back to the baked defaults. There is NO token-input escape hatch:
+      # OIDC via `target-instance` is the only auth path, no exceptions. No
+      # token is written to GITHUB_ENV.
       env:
         INPUT_ACTION: ${{ inputs.action }}
-        INPUT_AUDIT_OUT: ${{ inputs.audit-out }}
+        INPUT_SF_CLI_PATH: ${{ steps.install.outputs.sf-cli-path }}
         INPUT_WORKING_DIR: ${{ inputs.working-dir }}
         INPUT_OUTPUT: ${{ inputs.output }}
-        SF_CLI_PATH: ${{ steps.install.outputs.sf-cli-path }}
+        INPUT_AUDIT_OUT: ${{ inputs.audit-out }}
         SF_INSTANCE_URL: ${{ inputs.target-instance || env.SF_INSTANCE_URL }}
         ECA_CLIENT_ID: ${{ inputs.eca-client-id }}
         TOKEN_HANDLER_APEX: ${{ inputs.token-handler }}
         OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
         # Read by the sf-cli supervisor only (from its environment, never an
-        # argument), for the repository's policies. The sandboxed `sf` starts
-        # from an explicit environment that never carries a GITHUB_* variable,
-        # and the decode helper gets no environment at all.
+        # argument or an input), for the repository's input file, policies and
+        # door configuration. The sandboxed `sf` starts from an explicit
+        # environment that never carries a GITHUB_* variable, and the decode
+        # helper gets no environment at all.
         GITHUB_TOKEN: ${{ inputs.github-token }}
-        # Always write the {org}-masked endpoint declaration + generalized
-        # capability fingerprint (uploaded as artifacts below). Distinct from the
-        # SfAction `--audit-out` log above.
-        BUSBAR_SANDBOX_AUDIT_OUT: ${{ format('{0}/busbar-sandbox-audit.json', runner.temp) }}
-        BUSBAR_SANDBOX_FINGERPRINT_OUT: ${{ format('{0}/busbar-sandbox-fingerprint.json', runner.temp) }}
       run: |
         set -euo pipefail
-        action_file="${RUNNER_TEMP}/sf-action.json"
-        printf '%s\n' "$INPUT_ACTION" > "$action_file"
-        echo "Executing the SfAction from ${action_file} in the busbar-sandbox (ProxyOnly) against ${SF_INSTANCE_URL} (audit -> ${INPUT_AUDIT_OUT})"
+        echo "Executing the SfAction in the busbar-sandbox (ProxyOnly) against ${SF_INSTANCE_URL} (audit -> ${INPUT_AUDIT_OUT})"
+        sf-cli exec
 
-        args=(exec --action "@${action_file}"
-            --audit-out "$INPUT_AUDIT_OUT"
-            --sf-cli-path "$SF_CLI_PATH")
-        [[ -n "$INPUT_WORKING_DIR" ]] && args+=(--working-dir "$INPUT_WORKING_DIR")
-        [[ -n "$INPUT_OUTPUT" ]] && args+=(--output "$INPUT_OUTPUT")
-
-        sf-cli "${args[@]}"
-
-    - name: Upload sandbox audit + generalized fingerprint
+    - name: Upload the audit log and the run record
       if: always()
       uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
         path: |
-          ${{ format('{0}/busbar-sandbox-audit.json', runner.temp) }}
-          ${{ format('{0}/busbar-sandbox-fingerprint.json', runner.temp) }}
+          ${{ inputs.audit-out }}
+          ${{ steps.exec.outputs.run-report-path }}
         if-no-files-found: warn
         retention-days: 30
