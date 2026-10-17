@@ -26,7 +26,9 @@ injecting proxy** using a **placeholder** token; the proxy swaps in the real
 bearer token** — the `~/.sf` entry that lands on disk carries only the placeholder.
 The session is **revoked and zeroized** at job end. There is **no `org-auth`
 handoff step**, and **no token is written to `GITHUB_ENV`** or passed as an action
-input/output.
+input/output; a run whose environment carries a Salesforce token
+(`SF_ACCESS_TOKEN`) is refused before anything is minted, and so is a
+step that maps an input the action does not declare.
 
 To use it, the calling job must:
 
@@ -63,22 +65,37 @@ To use it, the calling job must:
 
 ## What it does
 
-1. Takes a declarative action (`SfAction` JSON) describing *what* to do.
+`sf-cli exec` is an Action on the Busbar Action framework's harness: the
+harness owns the inputs, the run's declaration, your repository's policies,
+the session and its disposal; the action body runs `sf` under the sandbox.
+
+1. Takes a declarative action (`SfAction` JSON or YAML) describing *what* to do.
 2. Installs `@salesforce/cli` at the version you name into a controlled prefix
   and captures the exact `sf` binary path to use.
-3. Refuses, **before a session is minted**, any action whose requests the policy
-  cannot inspect in this release (see [Variant availability](#variant-availability)),
-  a `data_query` whose SOQL does not parse, and a `working-dir` that holds a Git
-  directory.
-4. Mints the session, then — before the proxy or `sf` exists — reads your
-  repository's **policies** (`.busbar/policies/*.cedar` at the head of the
-  default branch; see [Repository policies](#repository-policies)) and its
-  **door configuration** (`.busbar/door.toml` at the same commit, if there is
-  one; see [Header forwarding](#header-forwarding-busbardoortoml)), resolves a
-  `data_query` against the org's describes, scores it, and writes the run's
-  **declaration** to the job log. A policy that forbids what the run declared,
-  or an invalid policy set or door configuration, stops the run here.
-5. Spawns that managed `sf` confined: read-only `/`, a private `HOME` and
+3. Resolves the inputs (the step's inputs over your repository's
+  `.busbar/actions/sf-cli.{json,yaml}` on the default branch; see
+  [Repository inputs](#repository-inputs-busbaractionssf-clijson)), refuses
+  **before a session is minted** any action whose requests the policy cannot
+  inspect in this release (see [Variant availability](#variant-availability)),
+  declares the run (the typed inputs, the grant, the job's signed
+  identity) in the job log, and then, still before a session is minted,
+  checks the declared SOQL of a `data_query`, the request line it would
+  make `sf` send, and the `working-dir`: a refused run mints nothing.
+4. Reads your repository's **policies** (`.busbar/policies/*.cedar` at the
+  head of the default branch; see [Repository policies](#repository-policies))
+  and asks them whether a session may be minted at all
+  (`Busbar::Action::"session.mint"`). An invalid policy set, or a policy that
+  forbids the mint, stops the run here, before anything is minted.
+5. Mints the session and holds it. Then, before the proxy or `sf` exists, it
+  refuses a `data_query` whose SOQL does not parse and a `working-dir` that
+  holds a Git directory (the session is revoked), reads the org's
+  `Organization` record and its **door configuration** (`.busbar/door.toml`
+  at the same commit, if there is one; see
+  [Header forwarding](#header-forwarding-busbardoortoml)), resolves a
+  `data_query` against the org's describes, scores it, and binds the request
+  policy with your policies as its overlay. A policy that forbids what the
+  run declared, or an invalid door configuration, stops the run here.
+6. Spawns that managed `sf` confined: read-only `/`, a private `HOME` and
   `TMPDIR` created for the run (and `working-dir`, if given) as the only writable
   paths, an explicit environment (nothing is inherited from the job; no
   `ACTIONS_*`, `GITHUB_*`, `RUNNER_*`, `LD_PRELOAD`, `LD_AUDIT` or `DYLD_*`
@@ -86,9 +103,13 @@ To use it, the calling job must:
   restricted via Landlock plus a seccomp network baseline (UDP, raw sockets and
   `AF_UNIX` stream sockets denied) *before* `exec`; the parent runner stays
   unconfined.
-6. Parses the structured result and persists a **tamper-evident audit record**
+7. Parses the structured result, persists a **tamper-evident audit record**
    (Blake3 manifest hash, granted capabilities, outcome, and the request
-   policy's report with the whole **run context**) as a workflow artifact.
+   policy's report with the whole **run context**) and writes the **run
+   record** (`run-report-path`: the declaration with its recorded facts, the
+   outcome, the policy report, the sandbox's endpoint record and the run
+   journal); both are uploaded as a workflow artifact. The session is
+   revoked on every path, a failed one included.
 
 The sandbox is built on the [`nono`](https://docs.rs/nono) capability runtime.
 Confinement is **unconditional**: egress is kernel-forced `ProxyOnly` via Landlock
@@ -111,10 +132,17 @@ support, session setup **fails closed** rather than running unconfined.
 | `token-handler` | `` | Apex token-exchange handler dev name. Defaults to `GitHubTokenExchangeHandler`. |
 | `oidc-audience` | `` | OIDC token audience. Defaults to `target-instance`. |
 | `sf-cli-version` | `latest` | npm version spec for `@salesforce/cli` to install. Any release works: the CLI's own org-resolution reads are admitted by what they read (read-only queries of `Organization`, `ScratchOrgInfo`, `SandboxProcess` and the run-as user's own `User` record, no credential-bearing field, any API version), not by their wording. Pin a version only for reproducibility. |
-| `github-token` | `${{ github.token }}` | Token the supervisor uses to read your default branch, `.busbar/policies` and `.busbar/door.toml` through the GitHub REST API; needs `contents: read`. Never given to `sf`. |
-| `working-dir` | `` | Working directory for the `sf` invocation (writable by `sf`). Refused before a session is minted when it is, or contains, `/tmp`, `RUNNER_TEMP`, a `GITHUB_ENV`/`GITHUB_OUTPUT`/`GITHUB_PATH`/`GITHUB_STATE`/`GITHUB_STEP_SUMMARY` file or the runner's `HOME`; when it is inside a Git directory or contains a `.git` entry at any depth (a directory, a worktree or submodule `gitdir:` file, or a symbolic link), because `sf` could otherwise plant `core.fsmonitor` or `core.hooksPath` for the job's later `git` commands; or when any directory in it cannot be read. Use a directory that holds no checkout. |
+| `github-token` | `${{ github.token }}` | Token the supervisor uses to read your default branch, `.busbar/actions/sf-cli.{json,yaml}`, `.busbar/policies` and `.busbar/door.toml` through the GitHub REST API; needs `contents: read`. Never given to `sf`. |
+| `working-dir` | `` | Working directory for the `sf` invocation (writable by `sf`). Refused before `sf` starts (the minted session is revoked) when it is, or contains, `/tmp`, `RUNNER_TEMP`, a `GITHUB_ENV`/`GITHUB_OUTPUT`/`GITHUB_PATH`/`GITHUB_STATE`/`GITHUB_STEP_SUMMARY` file or the runner's `HOME`; when it is inside a Git directory or contains a `.git` entry at any depth (a directory, a worktree or submodule `gitdir:` file, or a symbolic link), because `sf` could otherwise plant `core.fsmonitor` or `core.hooksPath` for the job's later `git` commands; or when any directory in it cannot be read. Use a directory that holds no checkout. |
 | `output` | `` | Path to write the structured `sf` result JSON. |
 | `audit-out` | `.busbar/logs/sandbox-audit.json` | Path to write the JSON audit log (each entry carries the request policy's redacted report under `.policy`). |
+
+Every input but `target-instance`, the auth configuration, `sf-cli-version`,
+`github-token`, `version` and `binary-repo` is one of the Action's own
+(`action`, `sf_cli_path`, `working_dir`, `output`, `audit_out`), resolved by
+the harness: the step's value over your repository's
+`.busbar/actions/sf-cli.{json,yaml}` over the default. The step maps only
+those five to the binary; an `INPUT_*` naming anything else refuses the run.
 | `version` | `latest` | `sf-cli` binary release tag. |
 | `binary-repo` | `busbar-actions/actions-dist` | Where to fetch the binary. |
 
@@ -122,12 +150,24 @@ support, session setup **fails closed** rather than running unconfined.
 
 | Output | Description |
 |---|---|
-| `success` | `"true"` when the action executed successfully. |
+| `success` | `"true"` when the action executed successfully, `"false"` when `sf` failed. |
 | `duration-ms` | Wall-clock duration of the `sf` invocation. |
 | `risk-level` | Inherent risk of the action (`low`/`medium`/`high`/`critical`). |
 | `sandbox-enforced` | `"true"` when kernel confinement was applied. |
 | `audit-path` | Path to the JSON audit log written for this run. |
 | `result-path` | Path to the structured result JSON (when `output` is set). |
+| `run-report-path` | Path to the run record the harness wrote (under `RUNNER_TEMP`; see [The run record](#the-run-record)). |
+| `org-kind` | How the org was classified: `scratch`, `sandbox` or `production` (anything doubtful is `production`). |
+| `claim-status` | `eligible` or `ineligible` (see [What changed](#what-changed-for-the-sandboxed-sf)). |
+| `policy-denied` | How many requests the request policy denied (each reached `sf` as HTTP 403). |
+
+What a failed run sets: when `sf` itself failed, `success` is `"false"` and
+`risk-level`, `sandbox-enforced` and `audit-path` are still set;
+`org-kind`, `claim-status` and `policy-denied` are set whenever the sandbox
+started, on success and on failure alike. A run refused before the sandbox
+started (an input, a pre-mint check, the policies, a refused mint, a refused
+bind) sets `run-report-path` alone, once a declaration exists, and the error
+annotation says why.
 | `sf-cli-path` | Path to the managed `sf` binary installed for this run. |
 | `sf-cli-prefix` | Prefix directory containing the managed `sf` install. |
 | `sf-cli-version` | Version of `@salesforce/cli` that was installed. |
@@ -151,7 +191,34 @@ Actions are tagged on the `action` field. Examples:
 
 See the crate's
 [`SfAction`](../../busbar-extensions/crates/sf-cli/src/action.rs)
-for the full vocabulary.
+for the full vocabulary. The document may also be YAML.
+
+## Repository inputs (`.busbar/actions/sf-cli.json`)
+
+The Action's inputs (`action`, `sf_cli_path`, `working_dir`, `output`,
+`audit_out`) are resolved by the harness from three tiers, deep-merged: the
+step's inputs, then the variable `SF_CLI_PATH` for `sf_cli_path`, then your
+repository's `.busbar/actions/sf-cli.json` (or `.yaml`, not both) at the
+head of its default branch, read with `github-token`. A file there sets
+defaults for every run of this action in the repository:
+
+```json
+{ "audit_out": ".busbar/logs/sf-cli.json", "action": { "action": "org_list" } }
+```
+
+A key naming no input, a file that does not parse, or a default branch that
+moves while the run starts refuses the run before anything is minted. The
+resolved inputs are the run's declaration (`run-report-path`), so they never
+hold a credential: a value that looks like one (`Bearer ...`, an
+`<org id>!...` session) refuses the run.
+
+The file is default-branch content: whoever can push to the default branch
+sets, for a run on any ref, every input the step does not set explicitly,
+with the same trust as `.busbar/policies` and the workflows themselves.
+Protect the default branch accordingly, and set in the step what a run must
+not inherit. A step input is read under the spelling the runner set it with
+(`working-dir` arrives as `INPUT_WORKING-DIR` and is the Action's
+`working_dir`); one input set under two spellings refuses the run.
 
 ## Variant availability
 
@@ -235,7 +302,7 @@ org kind. No input, environment variable or org kind enables it.
 
 Every run reads your repository's **`.busbar/policies/*.cedar`** from the head
 of its **default branch** when the run starts, validates them strictly
-against the Busbar Cedar schema (`busbar-cedar/1`), and applies them after
+against the Busbar Cedar schema (`busbar-cedar/2+busbar-cedar-sf/1`), and applies them after
 Busbar's compiled-in Baseline and the action's grant: a `forbid` can stop any
 request (a `permit` never allows anything the Baseline or the grant denies).
 With no policy files, nothing changes for `sf-cli`'s actions. An invalid
@@ -245,7 +312,7 @@ policy set fails the run before `sf` starts. Policies are asked once before
 ```cedar
 // Never read contact data (email, phone, address fields) from production.
 @id("no-contact-data-in-production")
-forbid (principal, action == Busbar::Action::"query", resource)
+forbid (principal, action == Salesforce::Action::"query", resource)
 when {
   resource.org_kind == "production" &&
   context.query.sensitive_classes.contains("contact_info")
@@ -255,7 +322,7 @@ when {
 ```cedar
 // No query Busbar scores 70 or more against production.
 @id("no-high-risk-soql-in-production")
-forbid (principal, action, resource)
+forbid (principal, action, resource is Salesforce::Org)
 when {
   resource.org_kind == "production" &&
   context.query.present && context.query.risk >= 70
@@ -265,7 +332,7 @@ when {
 ```cedar
 // Narrow the CLI's own org resolution: no sandbox lookups from production.
 @id("no-sandbox-lookup-in-production")
-forbid (principal, action == Busbar::Action::"query", resource)
+forbid (principal, action == Salesforce::Action::"query", resource)
 when {
   resource.org_kind == "production" &&
   context.query.org_resolution &&
@@ -279,6 +346,23 @@ the second one above forbids them in production. The full reference — what
 `principal`, `action`, `resource` and `context` carry, how policies combine,
 more examples — is in
 [busbar-actions/cci-run](https://github.com/busbar-actions/cci-run#writing-repository-policies).
+
+The same policies decide whether a session is minted at all: before anything
+is minted the harness asks them about `Busbar::Action::"session.mint"`, whose
+resource is the declared run (`Busbar::Run`: the action, the shape, the
+platform, the grant digest) and whose context names the action, the job's
+GitHub Environment and the inputs digest. The action is spelled
+`sf-cli:<variant>` (`sf-cli:data_query`, `sf-cli:org_list`) in
+`resource.action`, in `context.action` and in the request policy's
+`context.action` alike, so a policy keys on one variant or on every
+`sf-cli:*` run.
+
+```cedar
+// No session for this action from a job outside the `production` Environment.
+@id("production-environment-only")
+forbid (principal, action == Busbar::Action::"session.mint", resource)
+when { resource.action like "sf-cli:*" && context.environment != "production" };
+```
 
 ### Header forwarding (`.busbar/door.toml`)
 
@@ -331,6 +415,21 @@ a `LIMIT` over 200) scores 70 or more. Object names in
 does not load. The full table is in
 [busbar-actions/cci-run](https://github.com/busbar-actions/cci-run#risk-scores).
 
+## The run record
+
+Every run that got as far as a declaration writes a **run record**
+(`run-report-path`, under `RUNNER_TEMP`, uploaded with the audit log): the
+declaration with the facts the harness recorded as the run was set up (where
+the policies came from, what they said to `session.mint`, the minted
+credential's non-secret facts: its origin, the org id, the signed claims),
+the outcome and the error that ended the run, the request policy's report
+(the `platform` section: the run context included), the sandbox's endpoint
+record and generalized fingerprint with the org's host masked, and the run
+journal (the harness's events, the platform's `salesforce.bound` or
+`salesforce.refused`, and sf-cli's own notes: the manifest digest, the `sf`
+exit status and duration). Nothing in it is a token, a record value or the
+text of a query.
+
 ### What changed for the sandboxed `sf`
 
 - The workflow's `env:` no longer reaches `sf` (for example
@@ -356,7 +455,19 @@ does not load. The full table is in
 - The declaration is logged before `sf` starts, and the audit log carries
   the run context and the declared query's risk score (also when the
   placeholder login fails).
-- A `working-dir` holding a Git directory is refused before minting.
+- A `working-dir` holding a Git directory is refused before `sf` starts.
+- `sf-cli exec` runs on the Busbar Action framework's harness: the step maps
+  the Action's five inputs to `INPUT_*` and nothing else (an unknown
+  `INPUT_*` refuses the run), the inputs may also come from
+  `.busbar/actions/sf-cli.{json,yaml}` on the default branch, your policies
+  are asked about `session.mint` before anything is minted, and every run
+  writes a run record (`run-report-path`). The `BUSBAR_SANDBOX_AUDIT_OUT` and
+  `BUSBAR_SANDBOX_FINGERPRINT_OUT` files are gone: the endpoint record and
+  the fingerprint are in the run record.
+- The declared SOQL, the request line it would make `sf` send and the
+  `working-dir` are checked after the run is declared and before the
+  policies are asked or a session is minted; a refused run mints nothing. An
+  action without a grant is refused even earlier, before the declaration.
 - The job summary and the audit log (`.policy` on each entry) carry the
   redacted policy report: the org kind, every decision (each allow with
   `"inspection": "full"`) and the claim status. The claim status is
@@ -395,11 +506,13 @@ jobs:
             }
           output: .busbar/accounts.json
 
-      - name: Upload audit trail
+      - name: Upload the audit trail and the run record
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-audit
-          path: ${{ steps.q.outputs.audit-path }}
+          path: |
+            ${{ steps.q.outputs.audit-path }}
+            ${{ steps.q.outputs.run-report-path }}
 ```
 
 No `org-auth`/login step is needed — the binary mints, uses, and revokes the
